@@ -3,6 +3,7 @@ import json
 import os
 import boto3
 import re  # 正規表現モジュールをインポート
+import urllib.request
 from botocore.exceptions import ClientError
 
 
@@ -15,19 +16,68 @@ def extract_region_from_arn(arn):
     return "us-east-1"  # デフォルト値
 
 # グローバル変数としてクライアントを初期化（初期値）
-bedrock_client = None
+LLM_CLIENT = None # bedrock:
 
 # モデルID
 MODEL_ID = os.environ.get("MODEL_ID", "us.amazon.nova-lite-v1:0")
 
+NGROK_URL = "https://cb85-34-82-226-188.ngrok-free.app"
+class LLMClient:
+    def __init__(self, api_url):
+        self.api_url = api_url
+
+    def invoke_model(self, modelId, body, contentType="application/json"):
+        max_new_tokens=512
+        temperature=0.7
+        top_p=0.9
+        do_sample=True
+        print(f"Invoking model {modelId} with body: {body}")
+        prompt = json.loads(body).get("messages", "Please explain the AI Engineering in German.")
+        payload = {
+            "prompt": json.dumps(prompt),
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "do_sample": do_sample
+        }
+        print(f"Payload: {payload}")
+        print(f"Payload JSON: {json.dumps(payload)}")
+
+        req = urllib.request.Request(
+            url = f"{self.api_url}/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+            )
+        response = urllib.request.urlopen(req)
+        response_body = json.loads(response.read().decode("utf-8"))
+        return {
+            "body":{
+                "output": {
+                    "message": {
+                        "content": [
+                            {
+                                "text": response_body["generated_text"]
+                            }
+                        ],
+                    },
+                    "response_time": response_body["response_time"]
+                },
+            },
+        }
+
 def lambda_handler(event, context):
     try:
         # コンテキストから実行リージョンを取得し、クライアントを初期化
-        global bedrock_client
-        if bedrock_client is None:
+        global chat_client
+        print (f"chat_client: {NGROK_URL}")
+        if LLM_CLIENT == "bedrock":
             region = extract_region_from_arn(context.invoked_function_arn)
-            bedrock_client = boto3.client('bedrock-runtime', region_name=region)
+            chat_client = boto3.client('bedrock-runtime', region_name=region)
             print(f"Initialized Bedrock client in region: {region}")
+        else:
+            chat_client = LLMClient(NGROK_URL) 
+            print(f"Initialized llm client through NGROK: {NGROK_URL}")
         
         print("Received event:", json.dumps(event))
         
@@ -83,14 +133,18 @@ def lambda_handler(event, context):
         print("Calling Bedrock invoke_model API with payload:", json.dumps(request_payload))
         
         # invoke_model APIを呼び出し
-        response = bedrock_client.invoke_model(
+        response = chat_client.invoke_model(
             modelId=MODEL_ID,
             body=json.dumps(request_payload),
             contentType="application/json"
         )
-        
+        print("LLM response:", response)
         # レスポンスを解析
-        response_body = json.loads(response['body'].read())
+        if LLM_CLIENT == "bedrock":
+            response_body = json.loads(response['body'].read())
+        else:
+            response_body = response['body']
+        # response_body = json.loads(response['body'].read())
         print("Bedrock response:", json.dumps(response_body, default=str))
         
         # 応答の検証
